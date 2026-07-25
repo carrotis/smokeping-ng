@@ -1,25 +1,105 @@
-# kt.chigi.uk deployment overlay
+# kt.chigi.uk 배포 — 독립 실행형 (PostgreSQL, Grafana 포함)
 #
 # Usage:
-#   docker compose -f docker-compose.yml \
-#                  -f docker-compose.postgres.yml \
-#                  -f docker-compose.kt.yml \
-#                  up -d
+#   docker compose -f docker-compose.kt.yml up -d
+#
+# .env 필요:
+#   SMOKE_API_KEY       (kt-agent-01 용)
+#   SMOKE_LOCAL_KEY     (local-agent-01 용)
+#   POSTGRES_PASSWORD
+#   GRAFANA_PASSWORD    (선택, 기본값 admin)
 
 name: smokeping
 
 services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-smoke}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-smokeping}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smoke} -d ${POSTGRES_DB:-smokeping}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [smoke]
+
   smoke-server:
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SMOKE_API_KEY: ${SMOKE_API_KEY:?set SMOKE_API_KEY in .env}
+      SMOKE_LOCAL_KEY: ${SMOKE_LOCAL_KEY:?set SMOKE_LOCAL_KEY in .env}
+      SMOKE_STORAGE_DRIVER: postgresql
+      POSTGRES_USER: ${POSTGRES_USER:-smoke}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-smokeping}
+      SMOKE_RETENTION_DAYS: ${SMOKE_RETENTION_DAYS:-90}
+      SMOKE_LOG_LEVEL: ${SMOKE_LOG_LEVEL:-INFO}
     volumes:
       - ./deploy/config/server.kt.yaml:/etc/smokeping/server.yaml:ro
+    ports:
+      - "${SMOKE_SERVER_PORT:-8080}:8080"
+    networks: [smoke]
 
   smoke-agent:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      smoke-server:
+        condition: service_started
     environment:
+      SMOKE_API_KEY: ${SMOKE_API_KEY}
       SMOKE_AGENT_ID: kt-agent-01
       SMOKE_AGENT_LOCATION: kt
-      # kt agent uses SMOKE_API_KEY (same var, different agents use different keys)
-      SMOKE_API_KEY: ${SMOKE_API_KEY}
+      SMOKE_LOG_LEVEL: ${SMOKE_LOG_LEVEL:-INFO}
+    volumes:
+      - ./deploy/config/agent.docker.yaml:/etc/smokeping/agent.yaml:ro
+      - agent-spool:/var/lib/smoke-agent/spool
+    cap_add:
+      - NET_RAW
+    networks: [smoke]
 
   grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    depends_on:
+      smoke-server:
+        condition: service_started
     environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
       GF_INSTALL_PLUGINS: ""
+      POSTGRES_USER: ${POSTGRES_USER:-smoke}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-smokeping}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks: [smoke]
+
+networks:
+  smoke:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  agent-spool:
+  grafana-data:
