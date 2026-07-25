@@ -19,13 +19,21 @@ Implementation notes
 We prefix the format with ``%{stderr}`` so the report lands on stderr and the
 response body -- if we asked for one -- stays cleanly on stdout.  For older
 curl builds we fall back to an explicit ``key=value`` write-out format.
+
+``count`` requests are issued as ``count`` separate curl processes rather than
+chained with ``--next``.  Chaining is cheaper but curl reuses the connection
+between transfers, so only the first would measure DNS/TCP/TLS and the rest
+would report zeros -- giving a bimodal "distribution" that is an artifact of
+connection caching and a timing breakdown stuck at 0 ms.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import time
 from typing import Any, ClassVar
 
 from smokeagent.probes.base import Probe, ProbeTarget, register_probe
@@ -90,8 +98,11 @@ class CurlProbe(Probe):
     description = "HTTP/HTTPS via curl, capturing per-phase timings, edge IP and status"
 
     default_options: ClassVar[dict[str, Any]] = {
-        # Requests per cycle.  Chained with --next so one process does them all.
+        # Requests per cycle.  Each one is a separate curl invocation with its
+        # own connection, so the samples are comparable -- see build_argv().
         "count": 1,
+        # Seconds between requests within a cycle.
+        "interval": 0.0,
         # Total budget for the whole cycle.
         "timeout": 15.0,
         # Per-request budget (curl --max-time).
@@ -176,32 +187,61 @@ class CurlProbe(Probe):
         for entry in opts.get("resolve") or []:
             per_request += ["--resolve", str(entry)]
 
+        # One request per invocation.  Chaining `count` transfers with --next
+        # would be cheaper, but curl reuses the connection across them: only
+        # the first transfer measures DNS/TCP/TLS, the rest report zeros. That
+        # makes the samples non-comparable (one cold connect, N-1 warm hits)
+        # and leaves the timing breakdown reading 0 ms forever. A latency
+        # prober's samples have to measure the same thing, so we pay a fork
+        # per request instead. See probe().
+        #
         # -s: no progress meter and no error text, so stderr holds only our
         # write-out report.  Failures are reported via the exit code.
-        argv = ["curl", "-s"]
-        for index in range(int(opts["count"])):
-            if index:
-                argv.append("--next")
-            argv += [*per_request, url]
-        return argv
+        return ["curl", "-s", *per_request, url]
 
     # -- execution ---------------------------------------------------------
 
     async def probe(self, target: ProbeTarget) -> ProbeResult:
+        count = int(self.options["count"])
+        interval = float(self.options.get("interval") or 0.0)
         argv = self.build_argv(target.address)
-        output = await run_command(argv, timeout=self.timeout)
-        reports = _parse_json_reports(output.stderr)
 
-        if not reports and not output.timed_out:
-            # Almost certainly a curl older than 7.70 with no %{json}.
-            legacy_output = await run_command(
-                self.build_argv(target.address, legacy=True), timeout=self.timeout
-            )
-            legacy_reports = _parse_legacy_reports(legacy_output.stderr)
-            if legacy_reports:
-                output, reports = legacy_output, legacy_reports
+        reports: list[dict[str, Any]] = []
+        last_output: CommandOutput | None = None
+        deadline = time.monotonic() + self.timeout
 
-        return self.parse(output, reports, target.address)
+        for index in range(count):
+            if index:
+                if interval:
+                    await asyncio.sleep(interval)
+                # Stop early rather than blow through the cycle budget; the
+                # samples already collected are still a valid measurement.
+                if time.monotonic() >= deadline:
+                    break
+
+            remaining = max(1.0, deadline - time.monotonic())
+            output = await run_command(argv, timeout=remaining)
+            last_output = output
+            batch = _parse_json_reports(output.stderr)
+
+            if not batch and not output.timed_out and index == 0:
+                # Almost certainly a curl older than 7.70 with no %{json}.
+                legacy_output = await run_command(
+                    self.build_argv(target.address, legacy=True), timeout=remaining
+                )
+                batch = _parse_legacy_reports(legacy_output.stderr)
+                if batch:
+                    last_output = legacy_output
+
+            reports.extend(batch)
+            if output.timed_out:
+                break
+
+        if last_output is None:  # count < 1 is rejected by validate()
+            last_output = await run_command(argv, timeout=self.timeout)
+            reports = _parse_json_reports(last_output.stderr)
+
+        return self.parse(last_output, reports, target.address)
 
     # -- parsing -----------------------------------------------------------
 

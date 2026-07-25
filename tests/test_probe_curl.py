@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from smokeagent.probes.base import ProbeTarget
 from smokeagent.probes.curl import (
     CurlProbe,
     _parse_json_reports,
@@ -198,6 +199,79 @@ class TestParsing:
         assert "<redacted>" in result.details["command"]
 
 
+class TestMultiSampleExecution:
+    """`count` requests must be independent, comparable measurements.
+
+    curl reuses the connection across `--next` transfers, which used to make
+    samples 2..N measure a warm connection while sample 1 measured a cold one,
+    and left the reported DNS/TCP/TLS phases at zero.
+    """
+
+    async def test_count_runs_that_many_curl_processes(self, monkeypatch):
+        calls = []
+
+        async def fake_run(argv, timeout, **kwargs):
+            calls.append(argv)
+            return make_output(stderr=curl_json(time_total=0.10 + 0.01 * len(calls)))
+
+        monkeypatch.setattr("smokeagent.probes.curl.run_command", fake_run)
+        result = await CurlProbe({"count": 3}).probe(
+            ProbeTarget(name="t", address="https://example.com")
+        )
+
+        assert len(calls) == 3
+        assert all("--next" not in argv for argv in calls)
+        assert len(result.rtts_ms) == 3
+
+    async def test_every_sample_measures_a_fresh_connection(self, monkeypatch):
+        # Each invocation is a separate process, so each report carries real
+        # connection timings rather than zeros.
+        async def fake_run(argv, timeout, **kwargs):
+            return make_output(stderr=curl_json())
+
+        monkeypatch.setattr("smokeagent.probes.curl.run_command", fake_run)
+        result = await CurlProbe({"count": 3}).probe(
+            ProbeTarget(name="t", address="https://example.com")
+        )
+
+        assert result.details["tls_handshake_ms"] == pytest.approx(45.722)
+        assert result.details["tcp_connect_ms"] == pytest.approx(31.311)
+        assert result.details["dns_ms"] == pytest.approx(4.201)
+        for attempt in result.details["attempts"]:
+            assert attempt["tls_handshake_ms"] is not None
+            assert attempt["tcp_connect_ms"] > 0
+
+    async def test_a_timeout_partway_through_keeps_the_samples_taken(self, monkeypatch):
+        calls = []
+
+        async def fake_run(argv, timeout, **kwargs):
+            calls.append(argv)
+            if len(calls) >= 3:
+                return make_output(timed_out=True)
+            return make_output(stderr=curl_json())
+
+        monkeypatch.setattr("smokeagent.probes.curl.run_command", fake_run)
+        result = await CurlProbe({"count": 5}).probe(
+            ProbeTarget(name="t", address="https://example.com")
+        )
+
+        # Stopped at the timeout rather than running all five.
+        assert len(calls) == 3
+        assert result.success is False
+        assert result.error_type is ErrorType.TIMEOUT
+
+    async def test_single_request_still_costs_one_process(self, monkeypatch):
+        calls = []
+
+        async def fake_run(argv, timeout, **kwargs):
+            calls.append(argv)
+            return make_output(stderr=curl_json())
+
+        monkeypatch.setattr("smokeagent.probes.curl.run_command", fake_run)
+        await CurlProbe().probe(ProbeTarget(name="t", address="https://example.com"))
+        assert len(calls) == 1
+
+
 class TestReportExtraction:
     def test_extracts_several_json_objects(self):
         text = curl_json(http_code=200) + curl_json(http_code=301)
@@ -274,10 +348,13 @@ class TestCommandConstruction:
         )
         assert argv[argv.index("--resolve") + 1] == "example.com:443:1.2.3.4"
 
-    def test_count_chains_requests_with_next(self):
+    def test_each_request_is_its_own_invocation(self):
+        # Regression: chaining with --next made curl reuse the connection, so
+        # transfers 2..N reported connect/appconnect as 0 and the stored timing
+        # breakdown read 0 ms for DNS/TCP/TLS forever.
         argv = CurlProbe({"count": 3}).build_argv("https://example.com")
-        assert argv.count("--next") == 2
-        assert argv.count("https://example.com") == 3
+        assert "--next" not in argv
+        assert argv.count("https://example.com") == 1
 
     def test_headers_are_passed_through(self):
         argv = CurlProbe({"headers": {"X-Test": "1"}}).build_argv("https://example.com")

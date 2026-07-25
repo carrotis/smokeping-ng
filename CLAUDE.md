@@ -95,18 +95,34 @@ ICMP TTL-exceeded를 rate limit하는 라우터는 트래픽은 멀쩡히 넘기
 (`최소 = 34ms, 최대 = 35ms, 평균 = 34ms`)은 3개라서 걸러진다. 키워드 매칭으로
 바꾸지 말 것 — 로케일마다 깨진다.
 
-### 6. `Measurement`의 stats는 모델 불변식이다
+### 6. curl은 `count`번을 **별도 프로세스**로 실행한다 (`--next` 금지)
+
+`--next`로 묶으면 프로세스 하나로 끝나서 싸 보이지만, **curl이 커넥션을 재사용한다**:
+
+```
+transfer 1: num_connects=1  connect=0.116s  appconnect=0.145s  total=0.155s
+transfer 2: num_connects=0  connect=0.000s  appconnect=0.000s  total=0.006s
+```
+
+결과가 두 가지로 망가진다. 샘플 1개는 cold connect, 나머지는 warm hit이라 분포가
+커넥션 캐싱의 부산물이 되고 — smoke 그래프의 전제가 깨진다 — 대표 리포트의
+DNS/TCP/TLS가 영원히 0으로 찍혀서 대시보드의 "HTTP timing breakdown" 패널이
+죽는다. `count=1`(기본값)에선 안 드러나므로 테스트에 걸리기 어렵다.
+
+요청당 fork 하나를 지불하는 게 맞다. 최적화한답시고 되돌리지 말 것.
+
+### 7. `Measurement`의 stats는 모델 불변식이다
 
 `stats`/`latency_ms`/`loss_pct`는 `model_validator`에서 채워진다. 특정 생성자에만
 넣으면, 손으로 만든 객체나 옛 agent가 보낸 spool 파일에서 percentile 컬럼이 비게 된다.
 
-### 7. spool은 **가장 최신 파일은 절대 안 지운다**
+### 8. spool은 **가장 최신 파일은 절대 안 지운다**
 
 배치 하나가 `max_bytes`보다 크면, 한도를 지키느라 방금 쓴 것까지 지워서 spool이
 영원히 비게 된다. 설정된 것처럼 보이면서 전부 버리는 게, 잠깐 한도를 넘기는 것보다
 훨씬 나쁘다.
 
-### 8. 실패한 측정은 저장한다, 구멍으로 두지 않는다
+### 9. 실패한 측정은 저장한다, 구멍으로 두지 않는다
 
 부분 패킷 손실은 **성공한 측정**이다(그게 SmokePing이 보여주려는 신호다).
 완전 실패도 `error_type` + 도구의 원문 메시지와 함께 행으로 저장한다.
