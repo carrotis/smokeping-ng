@@ -1,0 +1,28 @@
+# smoke-server config — kt.chigi.uk deployment (PostgreSQL)
+http:
+  host: 0.0.0.0
+  port: 8080
+  proxy_headers: false
+
+auth:
+  header_name: X-API-Key
+  keys:
+    - label: kt-agent
+      key: ${SMOKE_API_KEY}
+      agent_ids: ["kt-agent-01"]
+    - label: local-agent
+      key: ${SMOKE_LOCAL_KEY}
+      agent_ids: ["local-agent-01"]
+
+storage:
+  driver: postgresql
+  ensure_schema: true
+  postgresql:
+    dsn: postgresql://${POSTGRES_USER:-smoke}:${POSTGRES_PASSWORD:-smoke}@postgres:5432/${POSTGRES_DB:-smokeping}
+    pool_min_size: 2
+    pool_max_size: 10
+    retention_days: ${SMOKE_RETENTION_DAYS:-90}
+
+logging:
+  level: ${SMOKE_LOG_LEVEL:-INFO}
+  format: json

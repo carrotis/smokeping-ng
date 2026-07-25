@@ -1,0 +1,25 @@
+# kt.chigi.uk deployment overlay
+#
+# Usage:
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.postgres.yml \
+#                  -f docker-compose.kt.yml \
+#                  up -d
+
+name: smokeping
+
+services:
+  smoke-server:
+    volumes:
+      - ./deploy/config/server.kt.yaml:/etc/smokeping/server.yaml:ro
+
+  smoke-agent:
+    environment:
+      SMOKE_AGENT_ID: kt-agent-01
+      SMOKE_AGENT_LOCATION: kt
+      # kt agent uses SMOKE_API_KEY (same var, different agents use different keys)
+      SMOKE_API_KEY: ${SMOKE_API_KEY}
+
+  grafana:
+    environment:
+      GF_INSTALL_PLUGINS: ""
