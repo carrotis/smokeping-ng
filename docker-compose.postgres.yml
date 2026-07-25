@@ -1,0 +1,46 @@
+# PostgreSQL overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+#
+# Adds a postgres service and points smoke-server at it.  ClickHouse is scaled
+# to zero rather than removed, so switching back is a single command.
+
+name: smokeping
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-smoke}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smoke}
+      POSTGRES_DB: ${POSTGRES_DB:-smokeping}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-smoke} -d ${POSTGRES_DB:-smokeping}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [smoke]
+
+  clickhouse:
+    # Keep the definition so `-f docker-compose.yml` alone still works, but do
+    # not start it in this configuration.
+    profiles: ["clickhouse-only"]
+
+  smoke-server:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SMOKE_STORAGE_DRIVER: postgresql
+      POSTGRES_USER: ${POSTGRES_USER:-smoke}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smoke}
+      POSTGRES_DB: ${POSTGRES_DB:-smokeping}
+
+volumes:
+  postgres-data:

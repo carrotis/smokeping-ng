@@ -1,0 +1,100 @@
+# smoke-agent config used by docker-compose.
+# A small but real target set, so the Grafana dashboards have something to
+# show within a minute of `docker compose up`.
+agent:
+  id: ${SMOKE_AGENT_ID:-compose-agent-01}
+  location: ${SMOKE_AGENT_LOCATION:-docker-local}
+  tags:
+    env: demo
+    deployment: compose
+
+server:
+  url: http://smoke-server:8080
+  api_key: ${SMOKE_API_KEY}
+  batch_max_size: 100
+  batch_max_seconds: 10.0
+  spool_dir: /var/lib/smoke-agent/spool
+  spool_max_bytes: 67108864
+
+scheduler:
+  max_concurrent_probes: 20
+  jitter: 0.1
+  stagger_start: true
+  enable_batching: true
+
+logging:
+  level: ${SMOKE_LOG_LEVEL:-INFO}
+  format: json
+
+probe_defaults:
+  ping:
+    count: 10
+    interval: 0.3
+    timeout: 15.0
+  fping:
+    count: 10
+    interval: 0.3
+    timeout: 20.0
+  dig:
+    count: 3
+  curl:
+    count: 1
+  mtr:
+    count: 5
+    timeout: 60.0
+
+targets:
+  # Batched into a single fping process.
+  - name: anycast
+    title: Public anycast resolvers
+    probe: fping
+    interval: 60
+    children:
+      - name: google-dns
+        host: 8.8.8.8
+      - name: cloudflare-dns
+        host: 1.1.1.1
+      - name: quad9
+        host: 9.9.9.9
+
+  - name: web
+    title: HTTPS endpoints
+    probe: curl
+    interval: 60
+    children:
+      - name: example-com
+        host: https://example.com
+      - name: cloudflare
+        host: https://www.cloudflare.com
+
+  # Two resolvers for the same name: the dashboard compares them by the IP
+  # that actually answered, which is the point of storing `resolved_ip`.
+  - name: dns
+    title: Resolver behaviour
+    probe: dig
+    interval: 60
+    children:
+      - name: via-cloudflare
+        host: www.example.com
+        options:
+          resolver: 1.1.1.1
+      - name: via-google
+        host: www.example.com
+        options:
+          resolver: 8.8.8.8
+
+  - name: paths
+    title: Path quality
+    probe: mtr
+    interval: 300
+    children:
+      - name: to-google-dns
+        host: 8.8.8.8
+
+  - name: services
+    title: TCP services
+    probe: nc
+    interval: 60
+    children:
+      - name: cloudflare-https
+        host: 1.1.1.1:443

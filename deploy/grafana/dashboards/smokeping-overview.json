@@ -1,0 +1,646 @@
+{
+  "uid": "smokeping-overview",
+  "title": "SmokePing — Overview",
+  "description": "Latency distribution (the smoke graph), success rate, per-endpoint-IP comparison and per-vantage-point comparison. Backed by ClickHouse; see the README for the PostgreSQL equivalents.",
+  "tags": ["smokeping", "latency", "network"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "ds",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "grafana-clickhouse-datasource",
+        "current": { "text": "SmokePing-ClickHouse", "value": "smokeping-clickhouse" },
+        "hide": 0
+      },
+      {
+        "name": "location",
+        "label": "Agent location",
+        "type": "query",
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+        "query": "SELECT DISTINCT agent_location FROM smokeping.measurements ORDER BY agent_location",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 1,
+        "sort": 1,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "probe",
+        "label": "Probe",
+        "type": "query",
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+        "query": "SELECT DISTINCT probe FROM smokeping.measurements ORDER BY probe",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 1,
+        "sort": 1,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "target",
+        "label": "Target",
+        "type": "query",
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+        "query": "SELECT DISTINCT target_name FROM smokeping.measurements WHERE agent_location IN (${location:sqlstring}) AND probe IN (${probe:sqlstring}) ORDER BY target_name",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2,
+        "sort": 1,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Latency and availability",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Smoke graph — latency distribution",
+      "description": "The original SmokePing view. Every individual round-trip time is unnested from rtts_ms, so the bands are a true distribution rather than a summary of summaries: min–max in light shading, the interquartile range darker, and the median as a line. A widening band means jitter even when the median is flat.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 10, "w": 18, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  min(rtt)            AS \"min\",\n  quantile(0.25)(rtt) AS \"p25\",\n  quantile(0.50)(rtt) AS \"median\",\n  quantile(0.75)(rtt) AS \"p75\",\n  max(rtt)            AS \"max\"\nFROM smokeping.measurements\nARRAY JOIN rtts_ms AS rtt\nWHERE $__timeFilter(ts)\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY time\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "max" },
+            "properties": [
+              { "id": "custom.fillBelowTo", "value": "min" },
+              { "id": "custom.fillOpacity", "value": 12 },
+              { "id": "custom.lineWidth", "value": 0 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-blue" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "p75" },
+            "properties": [
+              { "id": "custom.fillBelowTo", "value": "p25" },
+              { "id": "custom.fillOpacity", "value": 35 },
+              { "id": "custom.lineWidth", "value": 0 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "min" },
+            "properties": [{ "id": "custom.lineWidth", "value": 0 }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "p25" },
+            "properties": [{ "id": "custom.lineWidth", "value": 0 }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "median" },
+            "properties": [
+              { "id": "custom.lineWidth", "value": 2 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-blue" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Success rate",
+      "description": "Share of cycles where the probe produced a usable measurement. Partial packet loss still counts as a success — that is the signal, not an error.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT 100 * countIf(success = 1) / count() AS success_rate\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 95 },
+              { "color": "green", "value": 99.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Median latency",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 3, "w": 6, "x": 18, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT quantile(0.5)(latency_ms) AS median_ms\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND success = 1\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "decimals": 1, "color": { "mode": "thresholds" } },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Average packet loss",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 3, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT avg(loss_pct) AS loss_pct\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND packets_sent > 0\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Packet loss over time",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 11 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  target_name,\n  avg(loss_pct) AS loss_pct\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND packets_sent > 0\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY time, target_name\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Failures by error type",
+      "description": "Every failed probe is stored, with a canonical error_type. Grouping by it separates 'DNS is broken' from 'the path is down' at a glance.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 11 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  error_type,\n  count() AS failures\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND success = 0\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY time, error_type\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": { "drawStyle": "bars", "fillOpacity": 70, "lineWidth": 0, "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Per-endpoint IP comparison — which address is slow?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Latency by resolved IP",
+      "description": "One hostname behind anycast or a CDN is really N different services. resolved_ip records the address actually talked to, so a single degraded PoP or edge shows up as its own line instead of being averaged away.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 19 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  concat(target_name, ' @ ', resolved_ip) AS endpoint,\n  quantile(0.5)(latency_ms) AS median_ms\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND success = 1\n  AND resolved_ip != ''\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY time, endpoint\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Endpoint comparison",
+      "description": "Sorted by p95, worst first — the endpoints worth investigating are at the top.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 19 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT\n  resolved_ip                                  AS \"IP\",\n  any(target_name)                             AS \"Target\",\n  any(ip_family)                               AS \"Family\",\n  count()                                      AS \"Samples\",\n  round(quantile(0.50)(latency_ms), 2)         AS \"Median ms\",\n  round(quantile(0.95)(latency_ms), 2)         AS \"p95 ms\",\n  round(avg(jitter_ms), 2)                     AS \"Jitter ms\",\n  round(avg(loss_pct), 2)                      AS \"Loss %\",\n  round(100 * countIf(success = 1) / count(), 2) AS \"Success %\"\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND resolved_ip != ''\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY resolved_ip\nORDER BY \"p95 ms\" DESC\nLIMIT 100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Success %" },
+            "properties": [
+              { "id": "unit", "value": "percent" },
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "orange", "value": 95 },
+                    { "color": "green", "value": 99.5 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Loss %" },
+            "properties": [{ "id": "unit", "value": "percent" }]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "p95 ms", "desc": true }] }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Vantage point comparison — where does it look bad from?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Latency by agent location",
+      "description": "The same target measured from every vantage point. If one location diverges, the problem is the path from there — not the target.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  agent_location,\n  quantile(0.5)(latency_ms) AS median_ms\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND success = 1\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY time, agent_location\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Location comparison",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 29 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT\n  agent_location                               AS \"Location\",\n  uniq(agent_id)                               AS \"Agents\",\n  uniq(target_name)                            AS \"Targets\",\n  count()                                      AS \"Samples\",\n  round(quantile(0.50)(latency_ms), 2)         AS \"Median ms\",\n  round(quantile(0.95)(latency_ms), 2)         AS \"p95 ms\",\n  round(avg(loss_pct), 2)                      AS \"Loss %\",\n  round(100 * countIf(success = 1) / count(), 2) AS \"Success %\",\n  max(ts)                                      AS \"Last seen\"\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND probe       IN (${probe:sqlstring})\n  AND target_name IN (${target:sqlstring})\nGROUP BY agent_location\nORDER BY \"p95 ms\" DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Success %" },
+            "properties": [
+              { "id": "unit", "value": "percent" },
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "orange", "value": 95 },
+                    { "color": "green", "value": 99.5 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 400,
+      "type": "row",
+      "title": "HTTP detail (curl probe)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "HTTP timing breakdown",
+      "description": "Stacked phases from curl: DNS, TCP connect, TLS handshake, server think time and body transfer. This is what turns 'the site got slow' into 'the TLS handshake got slow'.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 39 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  round(avg(dns_ms), 2)                 AS \"DNS\",\n  round(avg(tcp_connect_ms), 2)         AS \"TCP connect\",\n  round(avg(tls_handshake_ms), 2)       AS \"TLS handshake\",\n  round(avg(server_processing_ms), 2)   AS \"Server processing\",\n  round(avg(content_transfer_ms), 2)    AS \"Content transfer\"\nFROM smokeping.v_curl\nWHERE $__timeFilter(ts)\n  AND success = 1\n  AND agent_location IN (${location:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY time\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 60,
+            "lineWidth": 0,
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "HTTP endpoints — status, final URL and edge IP",
+      "description": "url_effective exposes a target that has started redirecting somewhere unexpected; remote_ip identifies which CDN edge served it.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 39 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT\n  target_name                          AS \"Target\",\n  resolved_ip                          AS \"Edge IP\",\n  any(http_code)                       AS \"Status\",\n  any(http_version)                    AS \"HTTP\",\n  any(url_effective)                   AS \"Final URL\",\n  count()                              AS \"Requests\",\n  round(quantile(0.50)(ttfb_ms), 1)    AS \"TTFB p50\",\n  round(quantile(0.95)(total_ms), 1)   AS \"Total p95\",\n  max(ts)                              AS \"Last seen\"\nFROM smokeping.v_curl\nWHERE $__timeFilter(ts)\n  AND agent_location IN (${location:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY target_name, resolved_ip\nORDER BY \"Total p95\" DESC\nLIMIT 100"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Status" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "orange", "value": 300 },
+                    { "color": "red", "value": 400 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 500,
+      "type": "row",
+      "title": "DNS detail (dig probe)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 48 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "DNS latency by responding server",
+      "description": "8.8.8.8 is dozens of machines. This groups by the resolver that actually answered, which is the only way to see a single bad anycast PoP.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 49 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  dns_server_ip,\n  quantile(0.5)(latency_ms) AS median_ms\nFROM smokeping.v_dig\nWHERE $__timeFilter(ts)\n  AND dns_server_ip != ''\n  AND agent_location IN (${location:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY time, dns_server_ip\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Answered A/AAAA records",
+      "description": "Every address returned for each name, with when it was last seen. A record quietly repointed to a different CDN shows up here as a new row.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 49 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT\n  target_name        AS \"Name\",\n  answer_ip          AS \"Answer IP\",\n  any(dns_status)    AS \"Status\",\n  any(authoritative) AS \"Authoritative\",\n  count()            AS \"Observations\",\n  min(ts)            AS \"First seen\",\n  max(ts)            AS \"Last seen\"\nFROM smokeping.v_dig\nARRAY JOIN answer_ips AS answer_ip\nWHERE $__timeFilter(ts)\n  AND agent_location IN (${location:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nGROUP BY target_name, answer_ip\nORDER BY \"Name\", \"Observations\" DESC\nLIMIT 200"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": []
+      },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 600,
+      "type": "row",
+      "title": "Recent failures",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 58 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 15,
+      "type": "table",
+      "title": "Failed measurements",
+      "description": "Failures are stored, not discarded — with the timeout or error message that caused them.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 59 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT\n  ts                 AS \"Time\",\n  agent_location     AS \"From\",\n  probe              AS \"Probe\",\n  target_group       AS \"Group\",\n  target_name        AS \"Target\",\n  target             AS \"Address\",\n  resolved_ip        AS \"Resolved IP\",\n  error_type         AS \"Error\",\n  error_message      AS \"Detail\"\nFROM smokeping.measurements\nWHERE $__timeFilter(ts)\n  AND success = 0\n  AND agent_location IN (${location:sqlstring})\n  AND probe          IN (${probe:sqlstring})\n  AND target_name    IN (${target:sqlstring})\nORDER BY ts DESC\nLIMIT 200"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": []
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "Time", "desc": true }] }
+    }
+  ]
+}

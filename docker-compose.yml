@@ -1,0 +1,127 @@
+# =============================================================================
+# smokeping-py -- full stack: ClickHouse + smoke-server + smoke-agent + Grafana
+# =============================================================================
+#
+#   cp .env.example .env      # then edit SMOKE_API_KEY
+#   docker compose up -d
+#
+#   Grafana      http://localhost:3000   (admin / see GRAFANA_PASSWORD)
+#   Ingest API   http://localhost:8080/healthz
+#
+# To use PostgreSQL instead of ClickHouse:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+#
+# -----------------------------------------------------------------------------
+
+name: smokeping
+
+services:
+
+  # --- storage ---------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: smokeping
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      # Without this, the default user is created with no password *and* no
+      # access management, which surprises people later.
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      # Seeds the schema on first boot.  smoke-server also applies it at
+      # startup (ensure_schema), so this is belt and braces -- and it lets you
+      # inspect the tables before the server has ever run.
+      - ./deploy/clickhouse/initdb:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [smoke]
+
+  # --- ingest ----------------------------------------------------------------
+  smoke-server:
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      SMOKE_API_KEY: ${SMOKE_API_KEY:?set SMOKE_API_KEY in .env}
+      SMOKE_AGENT_ID: ${SMOKE_AGENT_ID:-compose-agent-01}
+      SMOKE_STORAGE_DRIVER: ${SMOKE_STORAGE_DRIVER:-clickhouse}
+      SMOKE_RETENTION_DAYS: ${SMOKE_RETENTION_DAYS:-90}
+      SMOKE_LOG_LEVEL: ${SMOKE_LOG_LEVEL:-INFO}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+    volumes:
+      - ./deploy/config/server.docker.yaml:/etc/smokeping/server.yaml:ro
+    ports:
+      - "${SMOKE_SERVER_PORT:-8080}:8080"
+    networks: [smoke]
+
+  # --- probing ---------------------------------------------------------------
+  smoke-agent:
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      smoke-server:
+        condition: service_started
+    environment:
+      SMOKE_API_KEY: ${SMOKE_API_KEY:?set SMOKE_API_KEY in .env}
+      SMOKE_AGENT_ID: ${SMOKE_AGENT_ID:-compose-agent-01}
+      SMOKE_AGENT_LOCATION: ${SMOKE_AGENT_LOCATION:-docker-local}
+      SMOKE_LOG_LEVEL: ${SMOKE_LOG_LEVEL:-INFO}
+    volumes:
+      - ./deploy/config/agent.docker.yaml:/etc/smokeping/agent.yaml:ro
+      # Survives a container restart, so a server outage does not lose data.
+      - agent-spool:/var/lib/smoke-agent/spool
+    # The probe binaries carry cap_net_raw as a file capability (see the
+    # Dockerfile), so the process itself stays unprivileged.  If your kernel
+    # or runtime strips file capabilities, add:
+    #   cap_add: [NET_RAW]
+    cap_add:
+      - NET_RAW
+    networks: [smoke]
+
+  # --- visualisation ---------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    depends_on:
+      smoke-server:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Datasource plugins for whichever backend is active.
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      # Referenced by the provisioned datasources.
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      POSTGRES_USER: ${POSTGRES_USER:-smoke}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smoke}
+      POSTGRES_DB: ${POSTGRES_DB:-smokeping}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks: [smoke]
+
+networks:
+  smoke:
+    driver: bridge
+
+volumes:
+  clickhouse-data:
+  grafana-data:
+  agent-spool:

@@ -1,0 +1,330 @@
+{
+  "uid": "smokeping-mtr",
+  "title": "SmokePing — Path analysis (mtr)",
+  "description": "Per-hop loss and latency from the mtr probe. Every hop of every cycle is stored as its own row in smokeping.mtr_hops, so you can ask 'which router got slow' instead of only 'the path got slow'.",
+  "tags": ["smokeping", "mtr", "network", "path"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": { "from": "now-12h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "ds",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "grafana-clickhouse-datasource",
+        "current": { "text": "SmokePing-ClickHouse", "value": "smokeping-clickhouse" },
+        "hide": 0
+      },
+      {
+        "name": "location",
+        "label": "Agent location",
+        "type": "query",
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+        "query": "SELECT DISTINCT agent_location FROM smokeping.mtr_hops ORDER BY agent_location",
+        "multi": false,
+        "includeAll": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "target",
+        "label": "Target",
+        "type": "query",
+        "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+        "query": "SELECT DISTINCT target_name FROM smokeping.mtr_hops WHERE agent_location = '${location}' ORDER BY target_name",
+        "multi": false,
+        "includeAll": false,
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Path at a glance",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Current path — the mtr table, as stored",
+      "description": "The most recent cycle, one row per hop. This is the familiar mtr report, except it is queryable history rather than a terminal snapshot.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 11, "w": 12, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT\n  hop_no                    AS \"Hop\",\n  if(hop_ip = '', '???', hop_ip) AS \"IP\",\n  hop_host                  AS \"Host\",\n  asn                       AS \"ASN\",\n  round(loss_pct, 1)        AS \"Loss %\",\n  sent                      AS \"Sent\",\n  round(best_ms, 2)         AS \"Best\",\n  round(avg_ms, 2)          AS \"Avg\",\n  round(worst_ms, 2)        AS \"Worst\",\n  round(stddev_ms, 2)       AS \"StDev\"\nFROM smokeping.mtr_hops\nWHERE $__timeFilter(ts)\n  AND agent_location = '${location}'\n  AND target_name    = '${target}'\n  AND measurement_id = (\n        SELECT measurement_id\n        FROM smokeping.mtr_hops\n        WHERE $__timeFilter(ts)\n          AND agent_location = '${location}'\n          AND target_name    = '${target}'\n        ORDER BY ts DESC\n        LIMIT 1\n      )\nORDER BY hop_no"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": false } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Loss %" },
+            "properties": [
+              { "id": "unit", "value": "percent" },
+              { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 1 },
+                    { "color": "orange", "value": 10 },
+                    { "color": "red", "value": 50 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": "Best|Avg|Worst|StDev" },
+            "properties": [{ "id": "unit", "value": "ms" }]
+          }
+        ]
+      },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 2,
+      "type": "barchart",
+      "title": "Latency by hop — where the time is spent",
+      "description": "Average RTT to each hop over the selected window. A step between two adjacent hops is the segment that adds the latency.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 11, "w": 12, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT\n  concat(toString(hop_no), '. ', if(hop_ip = '', '???', hop_ip)) AS hop,\n  round(avg(best_ms), 2)  AS \"Best\",\n  round(avg(avg_ms), 2)   AS \"Avg\",\n  round(avg(worst_ms), 2) AS \"Worst\"\nFROM smokeping.mtr_hops\nWHERE $__timeFilter(ts)\n  AND agent_location = '${location}'\n  AND target_name    = '${target}'\nGROUP BY hop_no, hop_ip\nORDER BY hop_no"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "min": 0, "custom": { "lineWidth": 1, "fillOpacity": 80 } },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "stacking": "none",
+        "xTickLabelRotation": 0,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Per-hop history",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 12 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Loss % by hop over time",
+      "description": "Read this the way you read an mtr table: loss that appears at one hop and disappears further along is ICMP rate limiting, not a problem. Loss that appears and persists to the destination is the real fault, and its first hop is the culprit.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  concat(toString(hop_no), '. ', if(hop_ip = '', '???', hop_ip)) AS hop,\n  avg(loss_pct) AS loss_pct\nFROM smokeping.mtr_hops\nWHERE $__timeFilter(ts)\n  AND agent_location = '${location}'\n  AND target_name    = '${target}'\nGROUP BY time, hop_no, hop_ip\nORDER BY time, hop_no"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Latency by hop over time",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  concat(toString(hop_no), '. ', if(hop_ip = '', '???', hop_ip)) AS hop,\n  avg(avg_ms) AS avg_ms\nFROM smokeping.mtr_hops\nWHERE $__timeFilter(ts)\n  AND agent_location = '${location}'\n  AND target_name    = '${target}'\n  AND hop_ip != ''\nGROUP BY time, hop_no, hop_ip\nORDER BY time, hop_no"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 1, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 5,
+      "type": "heatmap",
+      "title": "Hop latency heatmap",
+      "description": "Hop number on the y axis, time on the x axis, latency as colour. Congestion that walks along the path is obvious here in a way it is not in overlaid lines.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 23 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  toString(hop_no)    AS hop,\n  avg(avg_ms)         AS avg_ms\nFROM smokeping.mtr_hops\nWHERE $__timeFilter(ts)\n  AND agent_location = '${location}'\n  AND target_name    = '${target}'\n  AND hop_ip != ''\nGROUP BY time, hop_no\nORDER BY time, hop_no"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms", "custom": { "hideFrom": {} } }, "overrides": [] },
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "color": { "mode": "scheme", "scheme": "Turbo", "steps": 64, "reverse": false },
+        "legend": { "show": true },
+        "tooltip": { "mode": "single", "showColorScale": true },
+        "yAxis": { "axisLabel": "hop", "reverse": false }
+      }
+    },
+    {
+      "id": 300,
+      "type": "row",
+      "title": "Route stability",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Distinct paths observed",
+      "description": "path_signature is a stable hash of the responding hops, with silent (???) hops excluded so ICMP rate limiting cannot create phantom flaps. A step change here is a genuine reroute — correlate it with a latency shift on the panels above.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  uniq(path_signature) AS distinct_paths\nFROM smokeping.mtr_hops\nWHERE $__timeFilter(ts)\n  AND agent_location = '${location}'\n  AND target_name    = '${target}'\n  AND path_signature != ''\nGROUP BY time\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Observed paths",
+      "description": "Each distinct route taken during the window, with how often it was seen and the hops it used.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "table",
+          "format": 1,
+          "rawSql": "SELECT\n  path_signature                                      AS \"Path\",\n  uniq(measurement_id)                                AS \"Cycles\",\n  max(hop_no)                                         AS \"Hops\",\n  arrayStringConcat(groupUniqArray(hop_ip), ' > ')    AS \"Route\",\n  min(ts)                                             AS \"First seen\",\n  max(ts)                                             AS \"Last seen\"\nFROM smokeping.mtr_hops\nWHERE $__timeFilter(ts)\n  AND agent_location = '${location}'\n  AND target_name    = '${target}'\n  AND path_signature != ''\nGROUP BY path_signature\nORDER BY \"Last seen\" DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": false } },
+        "overrides": []
+      },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "End-to-end: destination latency and loss",
+      "description": "The destination hop only. Compare against the per-hop panels to see whether an end-to-end change was caused by a specific router.",
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 42 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "${ds}" },
+          "editorType": "sql",
+          "queryType": "timeseries",
+          "format": 2,
+          "rawSql": "SELECT\n  $__timeInterval(ts) AS time,\n  avg(avg_ms)   AS \"Latency ms\",\n  avg(loss_pct) AS \"Loss %\"\nFROM smokeping.mtr_hops\nWHERE $__timeFilter(ts)\n  AND is_destination = 1\n  AND agent_location = '${location}'\n  AND target_name    = '${target}'\nGROUP BY time\nORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Loss %" },
+            "properties": [
+              { "id": "unit", "value": "percent" },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "max", "value": 100 },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    }
+  ]
+}

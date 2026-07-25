@@ -1,0 +1,35 @@
+# smoke-server config used by docker-compose.
+# Hostnames match the compose service names.
+http:
+  host: 0.0.0.0
+  port: 8080
+
+auth:
+  header_name: X-API-Key
+  keys:
+    - label: compose-agent
+      key: ${SMOKE_API_KEY}
+      # The compose stack runs a single agent; bind the key to its id so the
+      # example demonstrates the right habit.
+      agent_ids: ["${SMOKE_AGENT_ID:-compose-agent-01}"]
+
+storage:
+  driver: ${SMOKE_STORAGE_DRIVER:-clickhouse}
+  ensure_schema: true
+
+  clickhouse:
+    url: http://clickhouse:8123
+    database: smokeping
+    user: default
+    password: ${CLICKHOUSE_PASSWORD:-}
+    retention_days: ${SMOKE_RETENTION_DAYS:-90}
+
+  postgresql:
+    dsn: postgresql://${POSTGRES_USER:-smoke}:${POSTGRES_PASSWORD:-smoke}@postgres:5432/${POSTGRES_DB:-smokeping}
+    pool_min_size: 2
+    pool_max_size: 10
+    retention_days: ${SMOKE_RETENTION_DAYS:-90}
+
+logging:
+  level: ${SMOKE_LOG_LEVEL:-INFO}
+  format: json

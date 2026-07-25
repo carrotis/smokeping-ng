@@ -1,0 +1,231 @@
+# =============================================================================
+# smoke-agent configuration
+# =============================================================================
+# Copy to /etc/smokeping/agent.yaml and edit.  Validate with:
+#
+#     smoke-agent check -c /etc/smokeping/agent.yaml
+#
+# Test a single target without shipping anything:
+#
+#     smoke-agent test -c agent.yaml --target /kr/kt-dns#ping
+#
+# TOML is also accepted; the loader picks the parser from the file extension.
+# -----------------------------------------------------------------------------
+
+# --- who and where is this agent --------------------------------------------
+agent:
+  # Stable, unique per agent.  Defaults to the hostname, but pin it explicitly
+  # so that re-creating a container does not orphan its history.
+  id: seoul-idc-01
+
+  # The vantage point.  This is the field that makes the agent/server split
+  # worth having: the same target measured from Seoul and from Frankfurt is
+  # two different answers, and every dashboard groups by this.
+  location: seoul-idc
+
+  # Free-form labels, stored as a Map/JSONB alongside every measurement.
+  # Anything you might want to slice by later belongs here.
+  tags:
+    region: kr
+    isp: kt
+    env: production
+    rack: b12
+
+# --- where to ship results ---------------------------------------------------
+server:
+  url: https://smoke.example.com
+  # ${VAR} is read from the environment at startup.  A missing variable with
+  # no `:-default` is a hard error rather than a silent empty key.
+  api_key: ${SMOKE_API_KEY}
+
+  timeout: 15.0
+  verify_tls: true
+  # ca_bundle: /etc/ssl/private-ca.pem   # for a private PKI
+
+  # Flush when either threshold trips.
+  batch_max_size: 200
+  batch_max_seconds: 10.0
+
+  # Retry envelope for one flush.  Sleeps are uniform(0, delay) -- full jitter,
+  # so agents recovering from a shared outage do not retry in lockstep.
+  max_retries: 4
+  retry_initial_delay: 1.0
+  retry_backoff: 1.5
+
+  compress_threshold_bytes: 4096
+
+  # Disk buffer used when the server is unreachable.  Strongly recommended:
+  # without it, an outage erases the very data that documents the outage.
+  spool_dir: /var/lib/smoke-agent/spool
+  spool_max_bytes: 268435456          # 256 MiB
+
+# --- runtime -----------------------------------------------------------------
+scheduler:
+  # Ceiling on simultaneously running probes; bounds CPU and file descriptors.
+  max_concurrent_probes: 50
+  # Random fraction of the interval added to each cycle, so 300 targets on a
+  # 60s interval do not all fire on the same second.
+  jitter: 0.1
+  # Spread each target's *first* run across its interval too, so a restart
+  # does not recreate the thundering herd.
+  stagger_start: true
+  # Let fping measure many targets from one process.
+  enable_batching: true
+
+logging:
+  level: INFO
+  format: json                        # json | text
+
+# Directories scanned for `*.py` probe plugins at startup.  Any module that
+# calls @register_probe is picked up -- no packaging step needed.
+plugin_dirs: []
+#  - /etc/smokeping/probes.d
+
+# --- probe defaults ----------------------------------------------------------
+# Applied under every target's own options.  Precedence, lowest first:
+#   probe class defaults -> probe_defaults -> group options -> target options
+probe_defaults:
+  ping:
+    count: 10                         # SmokePing's `pings` -- the smoke band
+    interval: 0.3
+    timeout: 15.0
+    packet_timeout: 2.0
+
+  fping:
+    count: 10
+    interval: 0.3
+    timeout: 20.0
+    max_batch: 200
+
+  dig:
+    count: 3
+    timeout: 10.0
+    record_type: A
+
+  curl:
+    count: 1
+    timeout: 20.0
+    request_timeout: 10.0
+    connect_timeout: 5.0
+    expect_status: ["2xx", "3xx"]
+    user_agent: smoke-agent/1.0
+
+  nc:
+    count: 3
+    connect_timeout: 3.0
+
+  mtr:
+    count: 5
+    timeout: 60.0
+    max_hops: 30
+
+# --- what to measure ---------------------------------------------------------
+# The tree mirrors SmokePing's hierarchical Targets section.  `probe`,
+# `interval` and `options` are inherited by children unless overridden, and
+# the nesting builds the group path stored as `target_group`.
+targets:
+
+  - name: kr
+    title: South Korea
+    probe: ping
+    interval: 60
+    children:
+
+      - name: dns
+        title: Korean resolvers
+        children:
+          - name: kt-dns
+            host: 168.126.63.1
+          - name: sk-dns
+            host: 210.220.163.82
+          # One target, two measurements: latency from ping, path from mtr.
+          - name: lg-dns
+            host: 164.124.101.2
+            probes: [ping, mtr]
+            # Per-probe option blocks for a multi-probe target.
+            mtr:
+              count: 10
+              interval: 300
+
+      - name: web
+        title: Korean sites
+        probe: curl
+        interval: 120
+        children:
+          - name: naver
+            host: https://www.naver.com
+          - name: daum
+            host: https://www.daum.net
+            options:
+              expect_status: [200]
+
+  - name: global
+    title: Global anycast
+    probe: fping                      # batched: one process for all of these
+    interval: 60
+    children:
+      - name: google-dns
+        host: 8.8.8.8
+      - name: cloudflare-dns
+        host: 1.1.1.1
+      - name: quad9
+        host: 9.9.9.9
+
+  - name: dns-health
+    title: Resolver behaviour
+    probe: dig
+    interval: 120
+    children:
+      # Which anycast PoP answers, and how fast?  `resolved_ip` records the
+      # server that actually replied, so a single bad PoP is visible.
+      - name: cloudflare-resolver
+        host: www.example.com
+        options:
+          resolver: 1.1.1.1
+      - name: google-resolver
+        host: www.example.com
+        options:
+          resolver: 8.8.8.8
+      # Catch a record being silently repointed.
+      - name: our-apex-record
+        host: example.com
+        options:
+          resolver: 8.8.8.8
+          expect_ips: ["93.184.216.34"]
+
+  - name: services
+    title: TCP/UDP services
+    probe: nc
+    interval: 60
+    children:
+      - name: prod-postgres
+        host: db.internal.example.com:5432
+      - name: prod-ssh
+        host: bastion.example.com:22
+        options:
+          expect_regex: "^SSH-2\\.0"
+      - name: prod-dns-udp
+        host: 10.0.0.53:53
+        options:
+          protocol: udp
+          # UDP needs a payload to elicit a reply; this is a DNS query for ".".
+          payload: "hex:abcd0100000100000000000000000001"
+
+  - name: paths
+    title: Path quality
+    probe: mtr
+    # mtr is expensive -- one full path walk every 5 minutes is plenty.
+    interval: 300
+    children:
+      - name: to-google-dns
+        host: 8.8.8.8
+      - name: to-upstream-gw
+        host: 203.0.113.1
+
+  # Keep the entry, stop the measurements.
+  - name: decommissioned
+    probe: ping
+    enabled: false
+    children:
+      - name: old-server
+        host: 192.0.2.99

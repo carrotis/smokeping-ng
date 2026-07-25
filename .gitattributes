@@ -1,0 +1,10 @@
+# 이 저장소는 리눅스에서 배포/실행된다. 윈도우에서 편집하더라도 CRLF가
+# 섞이지 않도록 전부 LF로 고정한다. Dockerfile과 셸에서 읽는 설정 파일에
+# CRLF가 들어가면 조용히 깨진다.
+* text=auto eol=lf
+
+# 명시적으로 바이너리 (혹시 추가될 경우 대비)
+*.png binary
+*.jpg binary
+*.gz  binary
+*.whl binary

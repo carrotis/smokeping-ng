@@ -1,0 +1,96 @@
+# =============================================================================
+# smoke-server configuration
+# =============================================================================
+# Copy to /etc/smokeping/server.yaml and edit.  Validate with:
+#
+#     smoke-server check -c /etc/smokeping/server.yaml
+#
+# Generate a key pair for an agent with:
+#
+#     smoke-server genkey --label seoul-idc
+#
+# -----------------------------------------------------------------------------
+
+http:
+  host: 0.0.0.0
+  port: 8080
+  # Reject payloads larger than this before parsing them.
+  max_body_bytes: 33554432            # 32 MiB
+  # Trust X-Forwarded-For / X-Forwarded-Proto.  Only enable when the server
+  # really is behind a reverse proxy you control -- otherwise a client can
+  # forge its own source address in your logs.
+  proxy_headers: false
+  # Set when mounted under a path prefix, e.g. "/smoke".
+  root_path: ""
+
+# --- authentication ----------------------------------------------------------
+# Lightweight by design: agents are long-lived machines with a config file, so
+# a shared secret in a header is the right weight of mechanism.  Run it behind
+# TLS -- a header secret is only as private as the transport.
+auth:
+  header_name: X-API-Key
+
+  # Never enable in production: it lets anyone who can reach the port write
+  # measurements attributed to any agent.
+  allow_anonymous: false
+
+  keys:
+    # Prefer `key_sha256` so this file never contains a live secret.
+    # `smoke-server genkey` prints both halves.
+    - label: seoul-idc
+      key_sha256: ${SMOKE_KEY_SEOUL_SHA256}
+      # Bind the key to the agent ids it may write as.  This is what stops a
+      # compromised edge agent from forging measurements that look like they
+      # came from a different location -- and the location is the entire point
+      # of the data.
+      agent_ids: ["seoul-idc-01", "seoul-idc-02"]
+
+    - label: frankfurt
+      key_sha256: ${SMOKE_KEY_FRANKFURT_SHA256}
+      agent_ids: ["frankfurt-01"]
+
+    # A plaintext key read from the environment also works, e.g. for local
+    # development or when a secret manager injects it directly.
+    - label: dev
+      key: ${SMOKE_API_KEY:-}
+      agent_ids: ["*"]
+      enabled: false
+
+# --- storage -----------------------------------------------------------------
+storage:
+  # clickhouse (preferred at scale) | postgresql
+  driver: clickhouse
+
+  # Create tables and views at startup.  Turn off when a migration tool owns
+  # the schema; apply it manually with `smoke-server migrate`.
+  ensure_schema: true
+
+  # Options may be nested under the driver name (shown here, so settings for
+  # both backends can live in one file) or given flat under `options:`.
+  clickhouse:
+    url: http://clickhouse:8123
+    database: smokeping
+    user: default
+    password: ${CLICKHOUSE_PASSWORD:-}
+    timeout: 30.0
+    # Used by the TTL clause in the generated DDL.
+    retention_days: 90
+    # Server-side batching of small inserts, but the response still waits for
+    # the commit -- so a 201 to the agent genuinely means "stored".
+    async_insert: true
+    verify_tls: true
+
+  postgresql:
+    dsn: postgresql://smoke:smoke@postgres:5432/smokeping
+    pool_min_size: 2
+    pool_max_size: 10
+    timeout: 30.0
+    # Postgres has no TTL. ensure_schema installs smokeping_purge(days);
+    # schedule it from cron or pg_cron -- see the README.
+    retention_days: 90
+    # Set to 0 when running behind PgBouncer in transaction pooling mode.
+    statement_cache_size: 64
+
+logging:
+  level: INFO
+  format: json                        # json | text
