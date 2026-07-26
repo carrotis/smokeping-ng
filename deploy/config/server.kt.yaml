@@ -18,7 +18,7 @@ storage:
   driver: postgresql
   ensure_schema: true
   postgresql:
-    dsn: postgresql://${POSTGRES_USER:-smoke}:${POSTGRES_PASSWORD:-smoke}@postgres:5432/${POSTGRES_DB:-smokeping}
+    dsn: postgresql://${POSTGRES_USER:-smoke}:${POSTGRES_PASSWORD:-smoke}@localhost:5432/${POSTGRES_DB:-smokeping}
     pool_min_size: 2
     pool_max_size: 10
     retention_days: ${SMOKE_RETENTION_DAYS:-90}

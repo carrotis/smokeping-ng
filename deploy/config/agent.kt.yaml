@@ -1,0 +1,94 @@
+# smoke-agent config — kt.chigi.uk native process deployment
+agent:
+  id: ${SMOKE_AGENT_ID:-kt-agent-01}
+  location: ${SMOKE_AGENT_LOCATION:-kt}
+  tags:
+    env: prod
+
+server:
+  url: http://localhost:8080
+  api_key: ${SMOKE_API_KEY}
+  batch_max_size: 100
+  batch_max_seconds: 10.0
+  spool_dir: /var/lib/smoke-agent/spool
+  spool_max_bytes: 67108864
+
+scheduler:
+  max_concurrent_probes: 20
+  jitter: 0.1
+  stagger_start: true
+  enable_batching: true
+
+logging:
+  level: ${SMOKE_LOG_LEVEL:-INFO}
+  format: json
+
+probe_defaults:
+  ping:
+    count: 10
+    interval: 0.3
+    timeout: 15.0
+  fping:
+    count: 10
+    interval: 0.3
+    timeout: 20.0
+  dig:
+    count: 3
+  curl:
+    count: 3
+  mtr:
+    count: 5
+    timeout: 60.0
+
+targets:
+  - name: anycast
+    title: 공개 anycast DNS
+    probe: fping
+    interval: 60
+    children:
+      - name: google-dns
+        host: 8.8.8.8
+      - name: cloudflare-dns
+        host: 1.1.1.1
+      - name: quad9
+        host: 9.9.9.9
+      - name: kt-dns
+        host: 168.126.63.1
+      - name: sk-dns
+        host: 210.220.163.82
+
+  - name: web
+    title: HTTPS 응답 속도
+    probe: curl
+    interval: 60
+    children:
+      - name: google
+        host: https://www.google.com
+      - name: naver
+        host: https://www.naver.com
+      - name: cloudflare
+        host: https://www.cloudflare.com
+
+  - name: dns
+    title: DNS 리졸버 비교
+    probe: dig
+    interval: 60
+    children:
+      - name: via-kt
+        host: www.naver.com
+        options:
+          resolver: 168.126.63.1
+      - name: via-cloudflare
+        host: www.naver.com
+        options:
+          resolver: 1.1.1.1
+
+  - name: paths
+    title: 경로 품질
+    probe: mtr
+    interval: 300
+    children:
+      - name: to-cloudflare
+        host: 1.1.1.1
+      - name: to-kt-dns
+        host: 168.126.63.1

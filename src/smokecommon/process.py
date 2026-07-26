@@ -1,24 +1,36 @@
 """Async subprocess helper shared by every binary-backed probe.
 
-Wraps :func:`asyncio.create_subprocess_exec` with the three things probes
+Wraps subprocess.run() in a thread executor with the three things probes
 always need and always get wrong:
 
 * a hard timeout that actually kills the child (and its children),
 * stdout/stderr captured as text without deadlocking on full pipes,
 * a clean "binary is not installed" signal instead of a raw OSError.
+
+subprocess.run() is used (not asyncio.create_subprocess_exec) because probes
+like mtr fork helper processes (mtr-packet) that inherit the stdout pipe FD.
+asyncio's SIGCHLD handler doesn't reliably reap the parent mtr zombie while
+that pipe is still held open, causing zombies to accumulate. subprocess.run()
+calls os.waitpid(pid, 0) directly, so every child is reaped unconditionally.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import shutil
-import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 
 IS_WINDOWS = sys.platform == "win32"
+
+# One shared pool; probes are I/O-bound so 16 threads handles bursts easily.
+_thread_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=16, thread_name_prefix="probe"
+)
 
 
 class ToolMissingError(FileNotFoundError):
@@ -106,75 +118,55 @@ async def run_command(
     full_env.setdefault("LC_ALL", "C")
     full_env["LANG"] = "C"
 
-    started = time.perf_counter()
-    # On POSIX put the child in its own process group so a timeout can kill
-    # the whole tree (mtr in particular spawns helpers).
-    creation: dict[str, object] = {}
+    # Put the child in its own process group so a timeout kills the whole tree.
+    kwargs: dict[str, object] = {}
     if IS_WINDOWS:
-        creation["creationflags"] = getattr(__import__("subprocess"), "CREATE_NEW_PROCESS_GROUP", 0)
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
-        creation["start_new_session"] = True
+        kwargs["start_new_session"] = True
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    def _run() -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            argv,
+            input=stdin,
+            capture_output=True,
+            timeout=timeout,
             env=full_env,
-            **creation,  # type: ignore[arg-type]
+            **kwargs,  # type: ignore[arg-type]
         )
-    except FileNotFoundError as exc:  # race: binary vanished after the which()
-        raise ToolMissingError(argv[0]) from exc
 
+    started = time.perf_counter()
+    loop = asyncio.get_running_loop()
     timed_out = False
+    returncode: int | None = None
+    stdout_b = stderr_b = b""
+
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout)
-    except TimeoutError:
+        # +2 s outer guard: subprocess.run kills+reaps on TimeoutExpired, so
+        # the thread finishes shortly after the inner timeout fires.
+        result = await asyncio.wait_for(
+            loop.run_in_executor(_thread_pool, _run),
+            timeout=timeout + 2.0,
+        )
+        stdout_b = result.stdout
+        stderr_b = result.stderr
+        returncode = result.returncode
+    except subprocess.TimeoutExpired:
+        # subprocess.run already killed and reaped the child before raising.
         timed_out = True
-        stdout_b, stderr_b = b"", b""
-        await _terminate(proc)
+    except FileNotFoundError as exc:
+        raise ToolMissingError(argv[0]) from exc
+    except TimeoutError:
+        # Outer asyncio guard fired — thread is still blocked but child is dead.
+        timed_out = True
     finally:
         duration_ms = (time.perf_counter() - started) * 1000.0
 
     return CommandOutput(
         argv=list(argv),
-        returncode=proc.returncode,
+        returncode=returncode,
         stdout=stdout_b.decode(encoding, errors="replace"),
         stderr=stderr_b.decode(encoding, errors="replace"),
         duration_ms=duration_ms,
         timed_out=timed_out,
     )
-
-
-async def _terminate(proc: asyncio.subprocess.Process, grace_s: float = 1.0) -> None:
-    """SIGTERM the process group, then SIGKILL whatever survives."""
-    if proc.returncode is not None:
-        return
-    try:
-        if IS_WINDOWS:
-            proc.terminate()
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=grace_s)
-        return
-    except TimeoutError:
-        pass
-
-    try:
-        if IS_WINDOWS:
-            proc.kill()
-        else:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-    # Reap so we do not leak a zombie.  The child is SIGKILLed, so this
-    # cannot hang for long.
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=grace_s)
-    except TimeoutError:
-        pass

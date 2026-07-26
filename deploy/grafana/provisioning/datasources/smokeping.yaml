@@ -31,7 +31,7 @@ datasources:
     access: proxy
     isDefault: false
     editable: true
-    url: postgres:5432
+    url: ${POSTGRES_HOST:-localhost}:5432
     user: ${POSTGRES_USER}
     database: ${POSTGRES_DB}
     jsonData:
