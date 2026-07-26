@@ -42,7 +42,9 @@ echo ">>> PostgreSQL ready"
 
 # ── 3. Python venv + smokeping-py ─────────────────────────────────────────────
 echo ">>> Setting up Python venv..."
-python3 -m venv "$VENV"
+# Use python3.11+ — pyproject.toml requires >=3.11
+PYTHON=$(command -v python3.12 || command -v python3.11 || command -v python3)
+"$PYTHON" -m venv "$VENV"
 "$VENV/bin/pip" install -q --upgrade pip
 "$VENV/bin/pip" install -q -e "$REPO_DIR[all]"
 
